@@ -42,6 +42,9 @@ var doHash bool
 // compareMode is set by the -compare flag.
 var compareMode bool
 
+// inventoryMode is set by the -inventory flag.
+var inventoryMode bool
+
 func (p *progress) draw(force bool) {
 	if !p.enabled || (!force && time.Since(p.last) < 100*time.Millisecond) {
 		return
@@ -133,13 +136,27 @@ func isTarGz(name string) bool { return strings.HasSuffix(strings.ToLower(name),
 func main() {
 	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 for every file and folder")
 	flag.BoolVar(&compareMode, "compare", false, "check that the .log/.tar.gz files in dirA exist anywhere under dirB")
+	flag.BoolVar(&inventoryMode, "inventory", false, "list the files inside every .zip under a directory")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output-dir]")
 		fmt.Fprintln(os.Stderr, "       hashvalidate -compare <dirA> <dirB> [output-dir]")
+		fmt.Fprintln(os.Stderr, "       hashvalidate -inventory <dir> [output-dir]")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	args := flag.Args()
+	if inventoryMode {
+		if len(args) < 1 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		outDir := "."
+		if len(args) > 1 {
+			outDir = args[1]
+		}
+		runInventory(args[0], outDir)
+		return
+	}
 	if compareMode {
 		if len(args) < 2 {
 			flag.Usage()
