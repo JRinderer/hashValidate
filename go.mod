@@ -1,0 +1,3 @@
+module hashnvalidi
+
+go 1.27.1
