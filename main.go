@@ -39,6 +39,9 @@ var prog progress
 // doHash is set by the -hash flag. By default only names are collected.
 var doHash bool
 
+// compareMode is set by the -compare flag.
+var compareMode bool
+
 func (p *progress) draw(force bool) {
 	if !p.enabled || (!force && time.Since(p.last) < 100*time.Millisecond) {
 		return
@@ -129,12 +132,26 @@ func isTarGz(name string) bool { return strings.HasSuffix(strings.ToLower(name),
 
 func main() {
 	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 for every file and folder")
+	flag.BoolVar(&compareMode, "compare", false, "check that the .log/.tar.gz files in dirA exist anywhere under dirB")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output-dir]")
+		fmt.Fprintln(os.Stderr, "       hashvalidate -compare <dirA> <dirB> [output-dir]")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	args := flag.Args()
+	if compareMode {
+		if len(args) < 2 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		outDir := "."
+		if len(args) > 2 {
+			outDir = args[2]
+		}
+		runCompare(args[0], args[1], outDir)
+		return
+	}
 	if len(args) < 1 {
 		flag.Usage()
 		os.Exit(2)
