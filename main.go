@@ -45,6 +45,9 @@ var compareMode bool
 // inventoryMode is set by the -inventory flag.
 var inventoryMode bool
 
+// bundlesMode is set by the -bundles flag.
+var bundlesMode bool
+
 func (p *progress) draw(force bool) {
 	if !p.enabled || (!force && time.Since(p.last) < 100*time.Millisecond) {
 		return
@@ -137,14 +140,28 @@ func main() {
 	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 (for -inventory: of every file inside the zips)")
 	flag.BoolVar(&compareMode, "compare", false, "check that the .log/.tar.gz files in dirA exist anywhere under dirB")
 	flag.BoolVar(&inventoryMode, "inventory", false, "list the files inside every .zip under a directory")
+	flag.BoolVar(&bundlesMode, "bundles", false, "hash each folder directly under a directory as one unit (one row per folder)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output-dir]")
 		fmt.Fprintln(os.Stderr, "       hashvalidate -compare <dirA> <dirB> [output-dir]")
 		fmt.Fprintln(os.Stderr, "       hashvalidate -inventory [-hash] <dir> [output-dir]")
+		fmt.Fprintln(os.Stderr, "       hashvalidate -bundles <dir> [output-dir]")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	args := flag.Args()
+	if bundlesMode {
+		if len(args) < 1 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		outDir := "."
+		if len(args) > 1 {
+			outDir = args[1]
+		}
+		runBundles(args[0], outDir)
+		return
+	}
 	if inventoryMode {
 		if len(args) < 1 {
 			flag.Usage()
