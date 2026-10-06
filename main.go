@@ -85,7 +85,7 @@ func (countingWriter) Write(b []byte) (int, error) {
 }
 
 // scan totals the items and bytes that walk will process.
-func scan(root, skip string) {
+func scan(root string) {
 	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -93,10 +93,16 @@ func scan(root, skip string) {
 		if p == root {
 			return nil
 		}
-		if p == skip || d.Type()&os.ModeSymlink != 0 {
+		if skipPaths[p] || isZip(d.Name()) || d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		prog.totalItems++
+		if d.IsDir() && isTarGz(d.Name()) {
+			return filepath.SkipDir
+		}
 		if doHash && !d.IsDir() {
 			if fi, err := d.Info(); err == nil {
 				prog.totalBytes += fi.Size()
@@ -107,18 +113,24 @@ func scan(root, skip string) {
 }
 
 type entry struct {
-	Type    string // "file" or "folder"
-	Name    string
-	RelPath string
-	SHA256  string
-	MD5     string
-	Err     string
+	Type   string // "file" or "folder"
+	Name   string
+	Dir    string // absolute path of the directory containing the entry
+	SHA256 string
+	MD5    string
+	Err    string
 }
+
+// skipPaths holds the report files so they never list themselves.
+var skipPaths = map[string]bool{}
+
+func isZip(name string) bool   { return strings.HasSuffix(strings.ToLower(name), ".zip") }
+func isTarGz(name string) bool { return strings.HasSuffix(strings.ToLower(name), ".tar.gz") }
 
 func main() {
 	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 for every file and folder")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output.csv]")
+		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output-dir]")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -134,85 +146,100 @@ func main() {
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		fatal(fmt.Errorf("%s is not a readable directory", root))
 	}
-	outPath := "hash_validation.csv"
+	outDir := "."
 	if len(args) > 1 {
-		outPath = args[1]
+		outDir = args[1]
 	}
-	outAbs, _ := filepath.Abs(outPath)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fatal(err)
+	}
+	allPath := filepath.Join(outDir, "all_files.csv")
+	dupPath := filepath.Join(outDir, "duplicate_files.csv")
+	for _, rp := range []string{allPath, dupPath} {
+		if a, err := filepath.Abs(rp); err == nil {
+			skipPaths[a] = true
+		}
+	}
 
 	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		prog.enabled = true
 		fmt.Fprintln(os.Stderr, "Scanning...")
 	}
-	scan(root, outAbs)
+	scan(root)
 
 	var entries []*entry
-	walk(root, root, outAbs, &entries)
+	walk(root, &entries)
 	prog.current = "done"
 	prog.draw(true)
 	if prog.enabled {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// Count occurrences of each name, separately for files and folders.
+	// Report 1: every file (and folder) with the directory it lives in.
+	header := []string{"Type", "Name", "Directory"}
+	if doHash {
+		header = append(header, "SHA256", "MD5")
+	}
+	header = append(header, "Error")
+	var rows [][]string
+	for _, e := range entries {
+		row := []string{e.Type, e.Name, e.Dir}
+		if doHash {
+			row = append(row, e.SHA256, e.MD5)
+		}
+		rows = append(rows, append(row, e.Err))
+	}
+	writeCSV(allPath, header, rows)
+
+	// Report 2: every occurrence of a duplicated name on its own line.
 	counts := map[string]int{}
 	for _, e := range entries {
 		counts[e.Type+"\x00"+e.Name]++
 	}
+	var dups []*entry
+	for _, e := range entries {
+		if counts[e.Type+"\x00"+e.Name] > 1 {
+			dups = append(dups, e)
+		}
+	}
+	sort.SliceStable(dups, func(i, j int) bool {
+		a, b := dups[i], dups[j]
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.Type != b.Type {
+			return a.Type < b.Type
+		}
+		return a.Dir < b.Dir
+	})
+	var dupRows [][]string
+	for _, e := range dups {
+		dupRows = append(dupRows, []string{e.Type, e.Name, e.Dir, fmt.Sprint(counts[e.Type+"\x00"+e.Name])})
+	}
+	writeCSV(dupPath, []string{"Type", "Name", "Directory", "TimesFound"}, dupRows)
 
-	f, err := os.Create(outPath)
+	fmt.Printf("Wrote %d entries to %s\n", len(entries), allPath)
+	fmt.Printf("Wrote %d duplicate entries to %s\n", len(dups), dupPath)
+}
+
+func writeCSV(path string, header []string, rows [][]string) {
+	f, err := os.Create(path)
 	if err != nil {
 		fatal(err)
 	}
 	defer f.Close()
 	w := csv.NewWriter(f)
-	header := []string{"Type", "Name", "RelativePath"}
-	if doHash {
-		header = append(header, "SHA256", "MD5")
-	}
-	w.Write(append(header, "Duplicate", "DuplicateCount", "Error"))
-	dupGroups := map[string][]string{}
-	for _, e := range entries {
-		n := counts[e.Type+"\x00"+e.Name]
-		dup := "No"
-		if n > 1 {
-			dup = "Yes"
-			k := e.Type + ": " + e.Name
-			dupGroups[k] = append(dupGroups[k], e.RelPath)
-		}
-		row := []string{e.Type, e.Name, e.RelPath}
-		if doHash {
-			row = append(row, e.SHA256, e.MD5)
-		}
-		w.Write(append(row, dup, fmt.Sprint(n), e.Err))
-	}
+	w.Write(header)
+	w.WriteAll(rows)
 	w.Flush()
 	if err := w.Error(); err != nil {
 		fatal(err)
-	}
-
-	fmt.Printf("Wrote %d entries to %s\n", len(entries), outPath)
-	if len(dupGroups) == 0 {
-		fmt.Println("No duplicate names found.")
-		return
-	}
-	keys := make([]string, 0, len(dupGroups))
-	for k := range dupGroups {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	fmt.Printf("\n%d duplicated name(s):\n", len(keys))
-	for _, k := range keys {
-		fmt.Printf("  %s (%d)\n", k, len(dupGroups[k]))
-		for _, p := range dupGroups[k] {
-			fmt.Printf("      %s\n", p)
-		}
 	}
 }
 
 // walk records every file and folder under dir (pre-order) and returns dir's
 // own SHA-256 and MD5, computed from its children.
-func walk(root, dir, skip string, out *[]*entry) (sha, md string, err error) {
+func walk(dir string, out *[]*entry) (sha, md string, err error) {
 	des, err := os.ReadDir(dir)
 	if err != nil {
 		return "", "", err
@@ -222,17 +249,19 @@ func walk(root, dir, skip string, out *[]*entry) (sha, md string, err error) {
 	var shaLines, mdLines strings.Builder
 	for _, de := range des {
 		p := filepath.Join(dir, de.Name())
-		if p == skip || de.Type()&os.ModeSymlink != 0 {
+		if skipPaths[p] || isZip(de.Name()) || de.Type()&os.ModeSymlink != 0 {
 			continue
 		}
-		rel, _ := filepath.Rel(root, p)
-		e := &entry{Name: de.Name(), RelPath: rel}
+		e := &entry{Name: de.Name(), Dir: dir}
 		*out = append(*out, e)
 
-		if de.IsDir() {
+		if de.IsDir() && isTarGz(de.Name()) {
+			// Treated as a plain file: record the name, never look inside.
+			e.Type = "file"
+		} else if de.IsDir() {
 			e.Type = "folder"
 			var werr error
-			e.SHA256, e.MD5, werr = walk(root, p, skip, out)
+			e.SHA256, e.MD5, werr = walk(p, out)
 			if !doHash {
 				e.SHA256, e.MD5 = "", ""
 			}
@@ -241,10 +270,10 @@ func walk(root, dir, skip string, out *[]*entry) (sha, md string, err error) {
 			}
 		} else if !doHash {
 			e.Type = "file"
-			prog.current = e.RelPath
+			prog.current = p
 		} else {
 			e.Type = "file"
-			prog.current = e.RelPath
+			prog.current = p
 			var herr error
 			e.SHA256, e.MD5, herr = hashFile(p)
 			if herr != nil {
