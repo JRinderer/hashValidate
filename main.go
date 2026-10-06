@@ -20,7 +20,83 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+// progress reports items and bytes processed on stderr. It only draws when
+// stderr is a terminal, so redirected output stays clean.
+type progress struct {
+	totalItems, doneItems int
+	totalBytes, doneBytes int64
+	current               string
+	last                  time.Time
+	enabled               bool
+}
+
+var prog progress
+
+func (p *progress) draw(force bool) {
+	if !p.enabled || (!force && time.Since(p.last) < 100*time.Millisecond) {
+		return
+	}
+	p.last = time.Now()
+	pct := 100.0
+	if p.totalBytes > 0 {
+		pct = float64(p.doneBytes) / float64(p.totalBytes) * 100
+	} else if p.totalItems > 0 {
+		pct = float64(p.doneItems) / float64(p.totalItems) * 100
+	}
+	name := p.current
+	if len(name) > 40 {
+		name = "..." + name[len(name)-37:]
+	}
+	fmt.Fprintf(os.Stderr, "\r[%5.1f%%] %d/%d items | %s / %s | %-40s",
+		pct, p.doneItems, p.totalItems, human(p.doneBytes), human(p.totalBytes), name)
+}
+
+func human(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// countingWriter feeds hashed bytes into the progress tracker.
+type countingWriter struct{}
+
+func (countingWriter) Write(b []byte) (int, error) {
+	prog.doneBytes += int64(len(b))
+	prog.draw(false)
+	return len(b), nil
+}
+
+// scan totals the items and bytes that walk will process.
+func scan(root, skip string) {
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if p == root {
+			return nil
+		}
+		if p == skip || d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		prog.totalItems++
+		if !d.IsDir() {
+			if fi, err := d.Info(); err == nil {
+				prog.totalBytes += fi.Size()
+			}
+		}
+		return nil
+	})
+}
 
 type entry struct {
 	Type    string // "file" or "folder"
@@ -49,8 +125,19 @@ func main() {
 	}
 	outAbs, _ := filepath.Abs(outPath)
 
+	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		prog.enabled = true
+		fmt.Fprintln(os.Stderr, "Scanning...")
+	}
+	scan(root, outAbs)
+
 	var entries []*entry
 	walk(root, root, outAbs, &entries)
+	prog.current = "done"
+	prog.draw(true)
+	if prog.enabled {
+		fmt.Fprintln(os.Stderr)
+	}
 
 	// Count occurrences of each name, separately for files and folders.
 	counts := map[string]int{}
@@ -128,12 +215,15 @@ func walk(root, dir, skip string, out *[]*entry) (sha, md string, err error) {
 			}
 		} else {
 			e.Type = "file"
+			prog.current = e.RelPath
 			var herr error
 			e.SHA256, e.MD5, herr = hashFile(p)
 			if herr != nil {
 				e.Err = herr.Error()
 			}
 		}
+		prog.doneItems++
+		prog.draw(false)
 		fmt.Fprintf(&shaLines, "%s:%s\n", e.Name, e.SHA256)
 		fmt.Fprintf(&mdLines, "%s:%s\n", e.Name, e.MD5)
 	}
@@ -149,7 +239,7 @@ func hashFile(path string) (sha, md string, err error) {
 	}
 	defer f.Close()
 	hs, hm := sha256.New(), md5.New()
-	if _, err := io.Copy(io.MultiWriter(hs, hm), f); err != nil {
+	if _, err := io.Copy(io.MultiWriter(hs, hm, countingWriter{}), f); err != nil {
 		return "", "", err
 	}
 	return hex.EncodeToString(hs.Sum(nil)), hex.EncodeToString(hm.Sum(nil)), nil
