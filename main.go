@@ -1,8 +1,8 @@
-// hashvalidation walks a directory tree, hashes every file and folder with
-// SHA-256 and MD5, writes the results to hash_validation.csv, and flags
-// names that appear more than once.
+// hashvalidate walks a directory tree and lists every file and folder in
+// hash_validation.csv, flagging names that appear more than once. With -hash
+// it also records SHA-256 and MD5 for each entry.
 //
-// Usage: go run . <root-dir> [output.csv]
+// Usage: go run . [-hash] <root-dir> [output.csv]
 //
 // Folder hashes are derived from their contents: the hash of the sorted list
 // of "<child name>:<child hash>" lines, so a folder's hash changes if anything
@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,9 @@ type progress struct {
 
 var prog progress
 
+// doHash is set by the -hash flag. By default only names are collected.
+var doHash bool
+
 func (p *progress) draw(force bool) {
 	if !p.enabled || (!force && time.Since(p.last) < 100*time.Millisecond) {
 		return
@@ -49,6 +53,10 @@ func (p *progress) draw(force bool) {
 	name := p.current
 	if len(name) > 40 {
 		name = "..." + name[len(name)-37:]
+	}
+	if !doHash {
+		fmt.Fprintf(os.Stderr, "\r[%5.1f%%] %d/%d items | %-40s", pct, p.doneItems, p.totalItems, name)
+		return
 	}
 	fmt.Fprintf(os.Stderr, "\r[%5.1f%%] %d/%d items | %s / %s | %-40s",
 		pct, p.doneItems, p.totalItems, human(p.doneBytes), human(p.totalBytes), name)
@@ -89,7 +97,7 @@ func scan(root, skip string) {
 			return nil
 		}
 		prog.totalItems++
-		if !d.IsDir() {
+		if doHash && !d.IsDir() {
 			if fi, err := d.Info(); err == nil {
 				prog.totalBytes += fi.Size()
 			}
@@ -108,11 +116,18 @@ type entry struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: hashvalidation <root-dir> [output.csv]")
+	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 for every file and folder")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output.csv]")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	args := flag.Args()
+	if len(args) < 1 {
+		flag.Usage()
 		os.Exit(2)
 	}
-	root, err := filepath.Abs(os.Args[1])
+	root, err := filepath.Abs(args[0])
 	if err != nil {
 		fatal(err)
 	}
@@ -120,8 +135,8 @@ func main() {
 		fatal(fmt.Errorf("%s is not a readable directory", root))
 	}
 	outPath := "hash_validation.csv"
-	if len(os.Args) > 2 {
-		outPath = os.Args[2]
+	if len(args) > 1 {
+		outPath = args[1]
 	}
 	outAbs, _ := filepath.Abs(outPath)
 
@@ -151,7 +166,11 @@ func main() {
 	}
 	defer f.Close()
 	w := csv.NewWriter(f)
-	w.Write([]string{"Type", "Name", "RelativePath", "SHA256", "MD5", "Duplicate", "DuplicateCount", "Error"})
+	header := []string{"Type", "Name", "RelativePath"}
+	if doHash {
+		header = append(header, "SHA256", "MD5")
+	}
+	w.Write(append(header, "Duplicate", "DuplicateCount", "Error"))
 	dupGroups := map[string][]string{}
 	for _, e := range entries {
 		n := counts[e.Type+"\x00"+e.Name]
@@ -161,7 +180,11 @@ func main() {
 			k := e.Type + ": " + e.Name
 			dupGroups[k] = append(dupGroups[k], e.RelPath)
 		}
-		w.Write([]string{e.Type, e.Name, e.RelPath, e.SHA256, e.MD5, dup, fmt.Sprint(n), e.Err})
+		row := []string{e.Type, e.Name, e.RelPath}
+		if doHash {
+			row = append(row, e.SHA256, e.MD5)
+		}
+		w.Write(append(row, dup, fmt.Sprint(n), e.Err))
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
@@ -210,9 +233,15 @@ func walk(root, dir, skip string, out *[]*entry) (sha, md string, err error) {
 			e.Type = "folder"
 			var werr error
 			e.SHA256, e.MD5, werr = walk(root, p, skip, out)
+			if !doHash {
+				e.SHA256, e.MD5 = "", ""
+			}
 			if werr != nil {
 				e.Err = werr.Error()
 			}
+		} else if !doHash {
+			e.Type = "file"
+			prog.current = e.RelPath
 		} else {
 			e.Type = "file"
 			prog.current = e.RelPath
