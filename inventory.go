@@ -2,7 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -12,7 +16,8 @@ import (
 // runInventory walks dir (recursively), opens each .zip only far enough to
 // read its table of contents, and writes inventory_report.csv with one line
 // per file inside each zip. The files inside the zips are never extracted or
-// read.
+// read. With -hash, each entry is streamed through SHA-256 and MD5 (in memory
+// only, nothing is written to disk) and the digests are added as columns.
 func runInventory(dir, outDir string) {
 	root, err := filepath.Abs(dir)
 	if err != nil {
@@ -46,7 +51,11 @@ func runInventory(dir, outDir string) {
 	for _, z := range zips {
 		r, err := zip.OpenReader(z)
 		if err != nil {
-			rows = append(rows, []string{filepath.Base(z), filepath.Dir(z), "", "", "", err.Error()})
+			row := []string{filepath.Base(z), filepath.Dir(z), "", "", ""}
+			if doHash {
+				row = append(row, "", "")
+			}
+			rows = append(rows, append(row, err.Error()))
 			continue
 		}
 		for _, f := range r.File {
@@ -54,16 +63,43 @@ func runInventory(dir, outDir string) {
 				continue
 			}
 			entries++
-			rows = append(rows, []string{
+			row := []string{
 				filepath.Base(z), filepath.Dir(z), f.Name, path.Base(f.Name),
-				fmt.Sprint(f.UncompressedSize64), "",
-			})
+				fmt.Sprint(f.UncompressedSize64),
+			}
+			errMsg := ""
+			if doHash {
+				sha, md, err := hashZipEntry(f)
+				if err != nil {
+					errMsg = err.Error()
+				}
+				row = append(row, md, sha)
+			}
+			rows = append(rows, append(row, errMsg))
 		}
 		r.Close()
 	}
-	writeCSV(reportPath, []string{"ZipFile", "ZipDirectory", "EntryPath", "EntryName", "Size", "Error"}, rows)
+	header := []string{"ZipFile", "ZipDirectory", "EntryPath", "EntryName", "Size"}
+	if doHash {
+		header = append(header, "MD5", "SHA256")
+	}
+	writeCSV(reportPath, append(header, "Error"), rows)
 
 	fmt.Printf("Found %d zip file(s) under %s\n", len(zips), root)
 	fmt.Printf("Listed %d file(s) inside them\n", entries)
 	fmt.Printf("Wrote %s\n", reportPath)
+}
+
+// hashZipEntry streams one zip entry through SHA-256 and MD5 in a single pass.
+func hashZipEntry(f *zip.File) (sha, md string, err error) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", "", err
+	}
+	defer rc.Close()
+	hs, hm := sha256.New(), md5.New()
+	if _, err := io.Copy(io.MultiWriter(hs, hm), rc); err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(hs.Sum(nil)), hex.EncodeToString(hm.Sum(nil)), nil
 }

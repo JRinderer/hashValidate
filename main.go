@@ -134,13 +134,13 @@ func isZip(name string) bool   { return strings.HasSuffix(strings.ToLower(name),
 func isTarGz(name string) bool { return strings.HasSuffix(strings.ToLower(name), ".tar.gz") }
 
 func main() {
-	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 for every file and folder")
+	flag.BoolVar(&doHash, "hash", false, "also compute SHA-256 and MD5 (for -inventory: of every file inside the zips)")
 	flag.BoolVar(&compareMode, "compare", false, "check that the .log/.tar.gz files in dirA exist anywhere under dirB")
 	flag.BoolVar(&inventoryMode, "inventory", false, "list the files inside every .zip under a directory")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hashvalidate [-hash] <root-dir> [output-dir]")
 		fmt.Fprintln(os.Stderr, "       hashvalidate -compare <dirA> <dirB> [output-dir]")
-		fmt.Fprintln(os.Stderr, "       hashvalidate -inventory <dir> [output-dir]")
+		fmt.Fprintln(os.Stderr, "       hashvalidate -inventory [-hash] <dir> [output-dir]")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
